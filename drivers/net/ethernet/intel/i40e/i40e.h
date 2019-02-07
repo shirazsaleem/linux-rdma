@@ -793,6 +793,7 @@ struct i40e_vsi {
 } ____cacheline_internodealigned_in_smp;
 
 struct i40e_netdev_priv {
+	struct idc_srv_provider prov_callbacks;
 	struct i40e_vsi *vsi;
 };
 
