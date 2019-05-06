@@ -137,24 +137,24 @@ static void ice_pf_dcb_recfg(struct ice_pf *pf)
 	set_bit(ICE_EVENT_TC_CHANGE, event->type);
 	event->reporter = NULL;
 	ice_setup_dcb_qos_info(pf, &event->info.port_qos);
-	bus_for_each_dev(&ice_peer_bus, NULL, event, ice_peer_check_for_reg);
+	ice_for_each_peer(pf, event, ice_peer_check_for_reg);
 	devm_kfree(&pf->pdev->dev, event);
 }
 
 /**
  * ice_peer_prep_tc_change - Pre-notify RDMA Peer in blocking call of TC change
- * @dev: ptr to peer device
+ * @peer_dev_int: ptr to peer device internal struct
  * @data: ptr to opaque data
  */
 static int
-ice_peer_prep_tc_change(struct device *dev, void __always_unused *data)
+ice_peer_prep_tc_change(struct ice_peer_dev_int *peer_dev_int,
+			void __always_unused *data)
 {
-	struct ice_peer_dev *peer_dev;
+	struct ice_peer_dev *peer_dev = &peer_dev_int->peer_dev;
 
-	if (!dev || !dev->driver)
+	if (!ice_validate_peer_dev(peer_dev))
 		return 0;
 
-	peer_dev = dev_to_ice_peer(dev);
 	if (peer_dev->peer_ops && peer_dev->peer_ops->prep_tc_change)
 		peer_dev->peer_ops->prep_tc_change(peer_dev);
 
@@ -191,7 +191,7 @@ int ice_pf_dcb_cfg(struct ice_pf *pf, struct ice_dcbx_cfg *new_cfg, bool locked)
 	}
 
 	/* Notify capable peers about impending change to TCs */
-	bus_for_each_dev(&ice_peer_bus, NULL, NULL, ice_peer_prep_tc_change);
+	ice_for_each_peer(pf, NULL, ice_peer_prep_tc_change);
 
 	/* Store old config in case FW config fails */
 	old_cfg = devm_kzalloc(&pf->pdev->dev, sizeof(*old_cfg), GFP_KERNEL);

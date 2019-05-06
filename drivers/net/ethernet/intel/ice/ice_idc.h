@@ -9,6 +9,7 @@
 #include <linux/if_ether.h>
 #include <linux/netdevice.h>
 #include <linux/dcbnl.h>
+#include <linux/platform_device.h>
 
 /* This major and minor version represent IDC API version information.
  * During peer driver registration, peer driver specifies major and minor
@@ -16,8 +17,31 @@
  * following defines and if mismatch, then peer driver registration
  * fails and appropriate message gets logged.
  */
-#define ICE_PEER_MAJOR_VER		5
-#define ICE_PEER_MINOR_VER		2
+#define ICE_PEER_MAJOR_VER		6
+#define ICE_PEER_MINOR_VER		0
+
+enum ice_peer_features {
+	ICE_PEER_FEATURE_ADK_SUPPORT,
+	ICE_PEER_FEATURE_PTP_SUPPORT,
+	ICE_PEER_FEATURE_SRIOV_SUPPORT,
+	ICE_PEER_FEATURE_PCIIOV_SUPPORT,
+	ICE_PEER_FEATURE_NBITS
+};
+
+#define ICE_ADK_SUP		0
+
+#define ICE_PTP_SUP		0
+
+#define ICE_SRIOV_SUP		BIT(ICE_PEER_FEATURE_SRIOV_SUPPORT)
+
+#ifdef CONFIG_PCI_IOV
+#define ICE_PCIIOV_SUP		BIT(ICE_PEER_FEATURE_PCIIOV_SUPPORT)
+#else
+#define ICE_PCIIOV_SUP		0
+#endif /* CONFIG_PCI_IOV */
+
+#define ICE_IDC_FEATURES (ICE_ADK_SUP | ICE_PTP_SUP | ICE_SRIOV_SUP |\
+			  ICE_PCIIOV_SUP)
 
 enum ice_event_type {
 	ICE_EVENT_LINK_CHANGE = 0x0,
@@ -77,7 +101,7 @@ enum ice_rdma_filter {
 struct ice_ver_info {
 	u16 major;
 	u16 minor;
-	u16 support;
+	u64 support;
 };
 
 /* Struct to hold per DCB APP info */
@@ -88,6 +112,7 @@ struct ice_dcb_app_info {
 };
 
 struct ice_peer_dev;
+struct ice_peer_dev_int;
 
 #define ICE_IDC_MAX_USER_PRIORITY        8
 #define ICE_IDC_MAX_APPS        8
@@ -234,6 +259,7 @@ struct ice_ops {
 				      struct ice_vector_info *qv_info,
 				      enum ice_res_type res_type,
 				      int res_idx);
+	int (*probe_finished)(struct ice_peer_dev *peer_dev);
 	int (*request_uninit)(struct ice_peer_dev *peer_dev);
 	int (*request_reinit)(struct ice_peer_dev *peer_dev);
 	int (*request_reset)(struct ice_peer_dev *dev,
@@ -261,7 +287,6 @@ struct ice_peer_ops {
 	/* Why we have 'open' and when it is expected to be called:
 	 * 1. symmetric set of API w.r.t close
 	 * 2. To be invoked form driver initialization path
-	 *     - call peer_driver:probe as soon as ice driver:probe is done
 	 *     - call peer_driver:open once ice driver is fully initialized
 	 * 3. To be invoked upon RESET complete
 	 *
@@ -294,22 +319,34 @@ struct ice_peer_ops {
 	void (*prep_tc_change)(struct ice_peer_dev *peer_dev);
 };
 
-struct ice_peer_device_id {
-	u32 vendor;
-
-	u32 device;
+#define ICE_PEER_RDMA_NAME	"rdma_ice"
 #define ICE_PEER_RDMA_DEV	0x00000010
+#define ICE_MAX_NUM_PEERS	4
+
+struct peer_dev_id {
+	char *name;
+	int id;
 };
+
+/* The peer_dev_ids needs to be initialized in the .c with the values:
+ * const struct platform_device_id peer_dev_ids[] = {
+ *    { ICE_PEER_RDMA_NAME, ICE_PEER_RDMA_DEV },
+ * {},
+ * } ;
+ */
+
+extern const struct peer_dev_id peer_dev_ids[];
 
 /* structure representing peer device */
 struct ice_peer_dev {
-	struct device dev;
+	struct platform_device platform_dev;
+	struct ice_ver_info ver;
 	struct pci_dev *pdev; /* PCI device of corresponding to main function */
-	struct ice_peer_device_id dev_id;
 	/* KVA / Linear address corresponding to BAR0 of underlying
 	 * pci_device.
 	 */
 	u8 __iomem *hw_addr;
+	int peer_dev_id;
 
 	unsigned int index;
 
@@ -345,11 +382,17 @@ struct ice_peer_dev {
 	 * by peer driver and called by ICE driver
 	 */
 	const struct ice_peer_ops *peer_ops;
+
+	/* Pointer to peer_drv struct to be populated by peer driver */
+	struct ice_peer_drv *peer_drv;
 };
 
 static inline struct ice_peer_dev *dev_to_ice_peer(struct device *_dev)
 {
-	return container_of(_dev, struct ice_peer_dev, dev);
+	struct platform_device *platform_dev;
+
+	platform_dev = container_of(_dev, struct platform_device, dev);
+	return container_of(platform_dev, struct ice_peer_dev, platform_dev);
 }
 
 /* structure representing peer driver
@@ -365,37 +408,6 @@ struct ice_peer_drv {
 
 	struct ice_ver_info ver;
 	const char *name;
-
-	struct device_driver driver;
-	struct ice_peer_device_id dev_id;
-
-	/* As part of ice_peer_drv initialization, peer driver is expected
-	 * to initialize driver.probe and driver.remove callbacks to peer
-	 * driver's respective probe and remove.
-	 *
-	 * driver_registration invokes driver->probe and likewise
-	 * driver_unregistration invokes driver->remove
-	 */
-	int (*probe)(struct ice_peer_dev *dev);
-	int (*remove)(struct ice_peer_dev *dev);
 };
 
-#define IDC_SIGNATURE 0x494e54454c494443ULL
-struct idc_srv_provider {
-	u64 signature;
-	u16 maj_ver;
-	u16 min_ver;
-	u8 rsvd[4];
-	int (*reg_peer_driver)(struct ice_peer_drv *drv);
-	int (*unreg_peer_driver)(struct ice_peer_drv *drv);
-};
-
-static inline struct ice_peer_drv *drv_to_ice_peer(struct device_driver *drv)
-{
-	return container_of(drv, struct ice_peer_drv, driver);
-};
-
-/* Exported symbols for driver registration/unregistration */
-int ice_reg_peer_driver(struct ice_peer_drv *peer);
-int ice_unreg_peer_driver(struct ice_peer_drv *peer);
 #endif /* _ICE_IDC_H_*/

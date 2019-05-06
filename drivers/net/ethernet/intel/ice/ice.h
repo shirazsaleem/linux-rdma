@@ -407,15 +407,14 @@ struct ice_pf {
 	unsigned long tx_timeout_last_recovery;
 	u32 tx_timeout_recovery_level;
 	char int_name[ICE_INT_NAME_STR_LEN];
+	struct ice_peer_dev_int **peers;
 	u32 sw_int_count;
 };
 
 struct ice_netdev_priv {
-	struct idc_srv_provider prov_callbacks;
 	struct ice_vsi *vsi;
 };
 
-extern struct bus_type ice_peer_bus;
 extern struct ida ice_peer_index_ida;
 
 /**
@@ -477,6 +476,8 @@ void ice_fill_rss_lut(u8 *lut, u16 rss_table_size, u16 rss_size);
 int ice_schedule_reset(struct ice_pf *pf, enum ice_reset_req reset);
 void ice_print_link_msg(struct ice_vsi *vsi, bool isup);
 int ice_init_peer_devices(struct ice_pf *pf);
+int ice_for_each_peer(struct ice_pf *pf, void *data,
+		      int (*fn)(struct ice_peer_dev_int *, void *));
 #ifdef CONFIG_DCB
 int ice_pf_ena_all_vsi(struct ice_pf *pf, bool locked);
 void ice_pf_dis_all_vsi(struct ice_pf *pf, bool locked);

@@ -10,6 +10,10 @@ DEFINE_IDA(ice_peer_index_ida);
 DEFINE_MUTEX(ice_peer_drv_mutex); /* lock for accessing list of peer drivers */
 LIST_HEAD(ice_peer_drv_list);
 
+const struct peer_dev_id peer_dev_ids[] = {
+	{ ICE_PEER_RDMA_NAME, ICE_PEER_RDMA_DEV },
+};
+
 /**
  * ice_validate_peer_dev - validate peer device state
  * @peer_dev: ptr to peer device
@@ -19,7 +23,7 @@ LIST_HEAD(ice_peer_drv_list);
  *
  * Returns true if the peer device is valid, false otherwise.
  */
-static bool ice_validate_peer_dev(struct ice_peer_dev *peer_dev)
+bool ice_validate_peer_dev(struct ice_peer_dev *peer_dev)
 {
 	struct ice_peer_dev_int *peer_dev_int;
 	struct ice_pf *pf;
@@ -45,33 +49,6 @@ static bool ice_validate_peer_dev(struct ice_peer_dev *peer_dev)
 }
 
 /**
- * ice_validate_peer - verify peer device is legit
- * @dev: ptr to device
- * @dev_val: bool to determine if peer_dev struct populated yet
- *
- * This function validtes the dev structure passed by the peer to make sure
- * it's set up correctly and is full of valid pointers.
- *
- * Returns true if the peer is valid, false otherwise.
- */
-static bool ice_validate_peer(struct device *dev, bool dev_val)
-{
-	struct ice_peer_drv *peer_drv;
-
-	if (!dev || !dev->driver)
-		return false;
-
-	peer_drv = drv_to_ice_peer(dev->driver);
-	if (!peer_drv)
-		return false;
-
-	if (dev_val && !ice_validate_peer_dev(dev_to_ice_peer(dev)))
-		return false;
-
-	return dev->bus == &ice_peer_bus;
-}
-
-/**
  * ice_peer_state_change - manage state machine for peer
  * @peer_dev: pointer to peer's configuration
  * @new_state: the state requested to transition into
@@ -80,10 +57,10 @@ static bool ice_validate_peer(struct device *dev, bool dev_val)
  * This function handles all state transitions for peer devices.
  * The state machine is as follows:
  *
- *     +<------------------------------------------------------+
- *					 +<----------+	       +
- *					 +	     +	       +
- *    INIT  -->  PROBE  --> PROBED --> OPENING	  CLOSED --> REMOVED
+ *     +<-----------------------+<-----------------------------+
+ *				|	 +<----------+	       +
+ *				\/	 +	     +	       +
+ *    INIT  --------------> PROBED --> OPENING	  CLOSED --> REMOVED
  *					 +           +
  *				       OPENED --> CLOSING
  *					 +	     +
@@ -101,48 +78,40 @@ ice_peer_state_change(struct ice_peer_dev_int *peer_dev, long new_state,
 
 	switch (new_state) {
 	case ICE_PEER_DEV_STATE_INIT:
-		if (test_and_clear_bit(ICE_PEER_DEV_STATE_PROBE,
+		if (test_and_clear_bit(ICE_PEER_DEV_STATE_REMOVED,
 				       peer_dev->state)) {
 			set_bit(ICE_PEER_DEV_STATE_INIT, peer_dev->state);
-			dev_info(&peer_dev->peer_dev.dev,
-				 "state transition from _PROBE to _INIT\n");
-		} else if (test_and_clear_bit(ICE_PEER_DEV_STATE_REMOVED,
-					      peer_dev->state)) {
-			set_bit(ICE_PEER_DEV_STATE_INIT, peer_dev->state);
-			dev_info(&peer_dev->peer_dev.dev,
+			dev_info(&peer_dev->peer_dev.platform_dev.dev,
 				 "state transition from _REMOVED to _INIT\n");
 		} else {
 			set_bit(ICE_PEER_DEV_STATE_INIT, peer_dev->state);
-			dev_info(&peer_dev->peer_dev.dev,
+			dev_info(&peer_dev->peer_dev.platform_dev.dev,
 				 "state set to _INIT\n");
 		}
 		break;
-	case ICE_PEER_DEV_STATE_PROBE:
+	case ICE_PEER_DEV_STATE_PROBED:
 		if (test_and_clear_bit(ICE_PEER_DEV_STATE_INIT,
 				       peer_dev->state)) {
-			set_bit(ICE_PEER_DEV_STATE_PROBE, peer_dev->state);
-			dev_info(&peer_dev->peer_dev.dev,
-				 "state transition from _INIT to _PROBE\n");
-		}
-		break;
-	case ICE_PEER_DEV_STATE_PROBED:
-		if (test_and_clear_bit(ICE_PEER_DEV_STATE_PROBE,
+			set_bit(ICE_PEER_DEV_STATE_PROBED, peer_dev->state);
+			dev_info(&peer_dev->peer_dev.platform_dev.dev,
+				 "state transition from _INIT to _PROBED\n");
+		} else if (test_and_clear_bit(ICE_PEER_DEV_STATE_REMOVED,
 				       peer_dev->state)) {
 			set_bit(ICE_PEER_DEV_STATE_PROBED, peer_dev->state);
-			dev_info(&peer_dev->peer_dev.dev,
-				 "state transition from _PROBE to _PROBED\n");
+			dev_info(&peer_dev->peer_dev.platform_dev.dev,
+				 "state transition from _REMOVED to _PROBED\n");
 		}
 		break;
 	case ICE_PEER_DEV_STATE_OPENING:
 		if (test_and_clear_bit(ICE_PEER_DEV_STATE_PROBED,
 				       peer_dev->state)) {
 			set_bit(ICE_PEER_DEV_STATE_OPENING, peer_dev->state);
-			dev_info(&peer_dev->peer_dev.dev,
+			dev_info(&peer_dev->peer_dev.platform_dev.dev,
 				 "state transition from _PROBED to _OPENING\n");
 		} else if (test_and_clear_bit(ICE_PEER_DEV_STATE_CLOSED,
 				       peer_dev->state)) {
 			set_bit(ICE_PEER_DEV_STATE_OPENING, peer_dev->state);
-			dev_info(&peer_dev->peer_dev.dev,
+			dev_info(&peer_dev->peer_dev.platform_dev.dev,
 				 "state transition from _CLOSED to _OPENING\n");
 		}
 		break;
@@ -150,7 +119,7 @@ ice_peer_state_change(struct ice_peer_dev_int *peer_dev, long new_state,
 		if (test_and_clear_bit(ICE_PEER_DEV_STATE_OPENING,
 				       peer_dev->state)) {
 			set_bit(ICE_PEER_DEV_STATE_OPENED, peer_dev->state);
-			dev_info(&peer_dev->peer_dev.dev,
+			dev_info(&peer_dev->peer_dev.platform_dev.dev,
 				 "state transition from _OPENING to _OPENED\n");
 		}
 		break;
@@ -158,7 +127,7 @@ ice_peer_state_change(struct ice_peer_dev_int *peer_dev, long new_state,
 		if (test_and_clear_bit(ICE_PEER_DEV_STATE_OPENED,
 				       peer_dev->state)) {
 			set_bit(ICE_PEER_DEV_STATE_PREP_RST, peer_dev->state);
-			dev_info(&peer_dev->peer_dev.dev,
+			dev_info(&peer_dev->peer_dev.platform_dev.dev,
 				 "state transition from _OPENED to _PREP_RST\n");
 		}
 		break;
@@ -166,7 +135,7 @@ ice_peer_state_change(struct ice_peer_dev_int *peer_dev, long new_state,
 		if (test_and_clear_bit(ICE_PEER_DEV_STATE_PREP_RST,
 				       peer_dev->state)) {
 			set_bit(ICE_PEER_DEV_STATE_PREPPED, peer_dev->state);
-			dev_info(&peer_dev->peer_dev.dev,
+			dev_info(&peer_dev->peer_dev.platform_dev.dev,
 				 "state transition _PREP_RST to _PREPPED\n");
 		}
 		break;
@@ -174,20 +143,20 @@ ice_peer_state_change(struct ice_peer_dev_int *peer_dev, long new_state,
 		if (test_and_clear_bit(ICE_PEER_DEV_STATE_OPENED,
 				       peer_dev->state)) {
 			set_bit(ICE_PEER_DEV_STATE_CLOSING, peer_dev->state);
-			dev_info(&peer_dev->peer_dev.dev,
+			dev_info(&peer_dev->peer_dev.platform_dev.dev,
 				 "state transition from _OPENED to _CLOSING\n");
 		}
 		if (test_and_clear_bit(ICE_PEER_DEV_STATE_PREPPED,
 				       peer_dev->state)) {
 			set_bit(ICE_PEER_DEV_STATE_CLOSING, peer_dev->state);
-			dev_info(&peer_dev->peer_dev.dev,
+			dev_info(&peer_dev->peer_dev.platform_dev.dev,
 				 "state transition _PREPPED to _CLOSING\n");
 		}
 		/* NOTE - up to peer to handle this situation correctly */
 		if (test_and_clear_bit(ICE_PEER_DEV_STATE_PREP_RST,
 				       peer_dev->state)) {
 			set_bit(ICE_PEER_DEV_STATE_CLOSING, peer_dev->state);
-			dev_warn(&peer_dev->peer_dev.dev,
+			dev_warn(&peer_dev->peer_dev.platform_dev.dev,
 				 "WARN: Peer state PREP_RST to _CLOSING\n");
 		}
 		break;
@@ -195,7 +164,7 @@ ice_peer_state_change(struct ice_peer_dev_int *peer_dev, long new_state,
 		if (test_and_clear_bit(ICE_PEER_DEV_STATE_CLOSING,
 				       peer_dev->state)) {
 			set_bit(ICE_PEER_DEV_STATE_CLOSED, peer_dev->state);
-			dev_info(&peer_dev->peer_dev.dev,
+			dev_info(&peer_dev->peer_dev.platform_dev.dev,
 				 "state transition from _CLOSING to _CLOSED\n");
 		}
 		break;
@@ -205,7 +174,7 @@ ice_peer_state_change(struct ice_peer_dev_int *peer_dev, long new_state,
 		    test_and_clear_bit(ICE_PEER_DEV_STATE_CLOSED,
 				       peer_dev->state)) {
 			set_bit(ICE_PEER_DEV_STATE_REMOVED, peer_dev->state);
-			dev_info(&peer_dev->peer_dev.dev,
+			dev_info(&peer_dev->peer_dev.platform_dev.dev,
 				 "state from _OPENED/_CLOSED to _REMOVED\n");
 			/* Clear registration for events when peer removed */
 			bitmap_zero(peer_dev->events, ICE_PEER_DEV_STATE_NBITS);
@@ -221,32 +190,22 @@ ice_peer_state_change(struct ice_peer_dev_int *peer_dev, long new_state,
 
 /**
  * ice_peer_close - close a peer device
- * @dev: device to close
+ * @peer_dev_int: device to close
  * @data: pointer to opaque data
  *
  * This function will also set the state bit for the peer to CLOSED. This
  * function is meant to be called from a bus_for_each_dev().
  */
-int ice_peer_close(struct device *dev, void *data)
+int ice_peer_close(struct ice_peer_dev_int *peer_dev_int, void *data)
 {
 	enum ice_close_reason reason = *(enum ice_close_reason *)(data);
-	struct ice_peer_dev_int *peer_dev_int;
-	struct ice_peer_dev *peer_dev;
+	struct ice_peer_dev *peer_dev = &peer_dev_int->peer_dev;
 	struct ice_pf *pf;
 	int i;
 
 	/* return 0 so bus_for_each_device will continue closing other peers */
-	if (!ice_validate_peer(dev, true)) {
-		/* since it is not one of our peer device, cannot trust
-		 * 'data', hence prefer to not use dev_* for err.
-		 */
-		pr_debug("%s: failed to verify peer dev %s\n", __func__,
-			 dev && dev->driver && dev->driver->name ?
-			 dev->driver->name : "");
+	if (!ice_validate_peer_dev(peer_dev))
 		return 0;
-	}
-	peer_dev = dev_to_ice_peer(dev);
-	peer_dev_int = peer_to_ice_dev_int(peer_dev);
 	pf = pci_get_drvdata(peer_dev->pdev);
 
 	if (test_bit(__ICE_DOWN, pf->state) ||
@@ -283,215 +242,19 @@ peer_close_out:
 }
 
 /**
- * ice_bus_match - check for peer match
- * @dev: pointer to device struct for peer
- * @drv: pointer to device driver struct for peer
- *
- * This function returns > zero in case it found a supported device,
- * and zero for an unsupported device.
- */
-static int ice_bus_match(struct device *dev, struct device_driver *drv)
-{
-	struct ice_peer_dev *peer_dev;
-	struct ice_peer_drv *peer_drv;
-
-	if (!dev || !drv)
-		return 0;
-	/* No need for extra validation here. The XXX_to_ice_peer functions
-	 * are wrappers for container_of. So if dev and drv are valid, peer_dev
-	 * and peer_drv are going to be valid as well.
-	 */
-	peer_dev = dev_to_ice_peer(dev);
-	peer_drv = drv_to_ice_peer(drv);
-
-	/* Make sure peer device and peer driver's vendor and device_id
-	 * matches. If matches, success, otherwise failure
-	 */
-	if (peer_dev->dev_id.vendor == peer_drv->dev_id.vendor &&
-	    peer_dev->dev_id.device == peer_drv->dev_id.device)
-		return 1;
-
-	return 0;
-}
-
-/**
- * ice_bus_probe - bus probe function
- * @dev: ptr to peer device
- *
- * This function is invoked by OS bus_infrastructure if bus_match function
- * returns success (1). It performs basic initialization and delays remainder
- * of initialization (including calling peer driver's probe), which is handled
- * by service_task. It sets correct device STATE.
- */
-static int ice_bus_probe(struct device *dev)
-{
-	struct ice_peer_dev_int *peer_dev_int;
-	struct ice_peer_drv *peer_drv;
-	struct ice_peer_dev *peer_dev;
-
-	if (!ice_validate_peer(dev, false)) {
-		/* since it is not one of our peer device, cannot trust
-		 * 'data', hence prefer to not use dev_* for err.
-		 */
-		pr_err("%s: failed to verify peer dev %s\n", __func__,
-		       dev->driver && dev->driver->name ?
-		       dev->driver->name : "");
-		return -EINVAL;
-	}
-
-	peer_dev = dev_to_ice_peer(dev);
-	peer_drv = drv_to_ice_peer(dev->driver);
-	peer_dev_int = peer_to_ice_dev_int(peer_dev);
-
-	switch (peer_drv->dev_id.device) {
-	case ICE_PEER_RDMA_DEV:
-		break;
-	default:
-		pr_err("unsupported device ID %u\n", peer_drv->dev_id.device);
-		return 0;
-	}
-
-	/* Initialize peer_dev state MUTEX */
-	mutex_init(&peer_dev_int->peer_dev_state_mutex);
-
-	/* Clear state bitmap on (re)registering devices */
-	bitmap_zero(peer_dev_int->state, ICE_PEER_DEV_STATE_NBITS);
-
-	/* For now , just mark the state of peer device and handle rest of the
-	 * initialization in service_task and then call peer driver "probe"
-	 */
-	ice_peer_state_change(peer_dev_int, ICE_PEER_DEV_STATE_INIT, false);
-
-	return 0;
-}
-
-/**
- * ice_bus_remove - bus remove function
- * @dev: ptr to peer device
- *
- * This function is invoked as a result of driver_unregister being invoked from
- * ice_unreg_peer_driver function. This function in turn calls
- * peer_driver's "close" and then "remove" function.
- */
-static int ice_bus_remove(struct device *dev)
-{
-	enum ice_close_reason reason = ICE_REASON_PEER_DRV_UNREG;
-	struct ice_peer_dev_int *peer_dev_int;
-	struct ice_peer_drv *peer_drv;
-	struct ice_peer_dev *peer_dev;
-	struct ice_pf *pf;
-	int i;
-
-	if (!ice_validate_peer(dev, true)) {
-		/* since it is not one of our peer device, cannot trust
-		 * 'data', hence prefer to not use dev_* for err.
-		 */
-		pr_err("%s: failed to verify peer dev %s\n", __func__,
-		       dev->driver && dev->driver->name ?
-		       dev->driver->name : "");
-		return 0;
-	}
-
-	peer_drv = drv_to_ice_peer(dev->driver);
-	peer_dev = dev_to_ice_peer(dev);
-	peer_dev_int = peer_to_ice_dev_int(peer_dev);
-
-	/* What action we take here depends on where the peer is in the
-	 * state machine. The return value for ice_bus_remove is largely
-	 * ignored by the kernel, so we need to make the best choice based
-	 * only on what we know about the peer.
-	 */
-
-	/* peer already removed */
-	if (test_bit(ICE_PEER_DEV_STATE_REMOVED, peer_dev_int->state))
-		return 0;
-
-	/* check for reset in progress before proceeding */
-	pf = pci_get_drvdata(peer_dev->pdev);
-	for (i = 0; i < ICE_MAX_RESET_WAIT; i++) {
-		if (!ice_is_reset_in_progress(pf->state))
-			break;
-		msleep(100);
-	}
-
-	/* peer still in init - nothing done yet */
-	if (test_bit(ICE_PEER_DEV_STATE_INIT, peer_dev_int->state))
-		goto exit_setstate;
-
-	/* is there an active function call out to peer */
-	if (test_bit(ICE_PEER_DEV_STATE_PROBE, peer_dev_int->state) ||
-	    test_bit(ICE_PEER_DEV_STATE_PREP_RST, peer_dev_int->state))
-		for (i = 0; i < ICE_IDC_MAX_STATE_WAIT; i++) {
-			if (!test_bit(ICE_PEER_DEV_STATE_PROBE,
-				      peer_dev_int->state) &&
-			    !test_bit(ICE_PEER_DEV_STATE_PREP_RST,
-				      peer_dev_int->state))
-				break;
-			msleep(100);
-		}
-
-	/* probe finished but not open yet */
-	if (test_bit(ICE_PEER_DEV_STATE_PROBED, peer_dev_int->state))
-		goto exit_remove;
-
-	/* is peer stuck in probe or in any intermediate state
-	 * no sense in calling any other API entries
-	 */
-	if (test_bit(ICE_PEER_DEV_STATE_PROBE, peer_dev_int->state) ||
-	    test_bit(ICE_PEER_DEV_STATE_PREP_RST, peer_dev_int->state))
-		goto exit_setstate;
-
-	/* is peer prepped for reset or in nominal open state */
-	if (test_bit(ICE_PEER_DEV_STATE_PREPPED, peer_dev_int->state) ||
-	    test_bit(ICE_PEER_DEV_STATE_OPENED, peer_dev_int->state))
-		goto exit_close;
-
-	/* peer is closed */
-	if (test_bit(ICE_PEER_DEV_STATE_CLOSED, peer_dev_int->state))
-		goto exit_remove;
-
-	/* peer in unknown state */
-	goto exit_setstate;
-
-exit_close:
-	ice_peer_close(dev, &reason);
-exit_remove:
-	if (peer_drv->remove)
-		peer_drv->remove(peer_dev);
-exit_setstate:
-	pr_info("Setting peer state to _REMOVED for peer device %s\n",
-		dev->driver->name ? dev->driver->name : "");
-	bitmap_zero(peer_dev_int->state, ICE_PEER_DEV_STATE_NBITS);
-	set_bit(ICE_PEER_DEV_STATE_REMOVED, peer_dev_int->state);
-	peer_dev->peer_ops = NULL;
-
-	return 0;
-}
-
-struct bus_type ice_peer_bus = {
-	.name = "ice_pseudo_bus",
-	.match = ice_bus_match,
-	.probe = ice_bus_probe,
-	.remove = ice_bus_remove,
-};
-
-/**
  * ice_close_peer_for_reset - queue work to close peer for reset
- * @dev: pointer peer dev struct
+ * @peer_dev_int: pointer peer dev internal struct
  * @data: pointer to opaque data used for reset type
  */
-int ice_close_peer_for_reset(struct device *dev, void *data)
+int ice_close_peer_for_reset(struct ice_peer_dev_int *peer_dev_int, void *data)
 {
-	struct ice_peer_dev_int *peer_dev_int;
-	struct ice_peer_dev *peer_dev;
+	struct ice_peer_dev *peer_dev = &peer_dev_int->peer_dev;
 	enum ice_reset_req reset;
 
-	if (!ice_validate_peer(dev, true))
+	if (!ice_validate_peer_dev(peer_dev))
 		return 0;
 
 	reset = *(enum ice_reset_req *)data;
-	peer_dev = dev_to_ice_peer(dev);
-	peer_dev_int = peer_to_ice_dev_int(peer_dev);
 
 	switch (reset) {
 	case ICE_RESET_GLOBR:
@@ -517,14 +280,15 @@ int ice_close_peer_for_reset(struct device *dev, void *data)
  */
 static void ice_check_peer_drv_for_events(struct ice_peer_dev *peer_dev)
 {
-	struct ice_peer_drv *peer_drv = drv_to_ice_peer(peer_dev->dev.driver);
 	const struct ice_peer_ops *p_ops = peer_dev->peer_ops;
-	struct ice_peer_drv_int *peer_drv_int;
 	struct ice_peer_dev_int *peer_dev_int;
+	struct ice_peer_drv_int *peer_drv_int;
+	struct ice_peer_drv *peer_drv;
 	int i;
 
-	peer_drv_int = peer_to_ice_drv_int(peer_drv);
+	peer_drv = peer_dev->peer_drv;
 	peer_dev_int = peer_to_ice_dev_int(peer_dev);
+	peer_drv_int = peer_to_ice_drv_int(peer_drv);
 
 	for_each_set_bit(i, peer_dev_int->events, ICE_EVENT_NBITS) {
 		struct ice_event *curr = &peer_drv_int->current_events[i];
@@ -537,7 +301,7 @@ static void ice_check_peer_drv_for_events(struct ice_peer_dev *peer_dev)
 
 /**
  * ice_check_peer_for_events - check peer_devs for events new peer reg'd for
- * @dev: peer to check for events
+ * @src_peer_int: peer to check for events
  * @data: ptr to opaque data, to be used for the peer struct that opened
  *
  * This function is to be called when a peer device is opened.
@@ -548,16 +312,20 @@ static void ice_check_peer_drv_for_events(struct ice_peer_dev *peer_dev)
  *
  * This function is meant to be called by a device_for_each_child.
  */
-static int ice_check_peer_for_events(struct device *dev, void *data)
+static int ice_check_peer_for_events(struct ice_peer_dev_int *src_peer_int,
+				     void *data)
 {
 	struct ice_peer_dev *new_peer = (struct ice_peer_dev *)data;
-	struct ice_peer_dev *src_peer = dev_to_ice_peer(dev);
+	struct ice_peer_dev *src_peer = &src_peer_int->peer_dev;
 	const struct ice_peer_ops *p_ops = new_peer->peer_ops;
-	struct ice_peer_dev_int *new_peer_int, *src_peer_int;
+	struct ice_peer_dev_int *new_peer_int;
 	int i;
 
+	if (!ice_validate_peer_dev(new_peer) ||
+	    !ice_validate_peer_dev(src_peer))
+		return 0;
+
 	new_peer_int = peer_to_ice_dev_int(new_peer);
-	src_peer_int = peer_to_ice_dev_int(src_peer);
 
 	for_each_set_bit(i, new_peer_int->events, ICE_EVENT_NBITS) {
 		struct ice_event *curr = &src_peer_int->current_events[i];
@@ -572,106 +340,81 @@ static int ice_check_peer_for_events(struct device *dev, void *data)
 }
 
 /**
+ * ice_for_each_peer - iterate across and call function for each peer dev
+ * @pf: pointer to private board struct
+ * @data: data to pass to function on each call
+ * @fn: pointer to function to call for each peer
+ *
+ * This function is to be used similarly to bus_for_each_dev
+ */
+int ice_for_each_peer(struct ice_pf *pf, void *data,
+		      int (*fn)(struct ice_peer_dev_int *, void *))
+{
+	struct ice_peer_dev_int *peer_dev_int;
+	int i, ret;
+
+	for (i = 0; i < ARRAY_SIZE(peer_dev_ids); i++) {
+		peer_dev_int = pf->peers[i];
+		if (peer_dev_int) {
+			ret = fn(peer_dev_int, data);
+			if (ret)
+				break;
+		}
+	}
+
+	return ret;
+}
+
+/**
  * ice_finish_init_peer_device - complete peer device initialization
- * @dev: ptr to peer device
+ * @peer_dev_int: ptr to peer device internal struct
  * @data: ptr to opaque data
  *
- * This function completes remaining initialization of peer_devices and
- * triggers peer driver's probe (aka open)
+ * This function completes remaining initialization of peer_devices
  */
-int ice_finish_init_peer_device(struct device *dev, void __always_unused *data)
+int ice_finish_init_peer_device(struct ice_peer_dev_int *peer_dev_int,
+				void __always_unused *data)
 {
-	struct ice_port_info *port_info = NULL;
-	struct ice_peer_dev_int *peer_dev_int;
+	struct ice_peer_dev *peer_dev = &peer_dev_int->peer_dev;
 	struct ice_peer_drv *peer_drv;
-	struct ice_peer_dev *peer_dev;
-	struct ice_vsi *vsi;
 	struct ice_pf *pf;
 	int ret = 0;
 
 	/* peer_dev will not always be populated at the time of this check */
-	if (!ice_validate_peer(dev, false))
-		return 0;
+	if (!ice_validate_peer_dev(peer_dev))
+		return ret;
 
-	peer_dev = dev_to_ice_peer(dev);
-	peer_dev_int = peer_to_ice_dev_int(peer_dev);
-	peer_drv = drv_to_ice_peer(dev->driver);
+	peer_drv = peer_dev->peer_drv;
 	pf = pci_get_drvdata(peer_dev->pdev);
-
-	peer_dev->hw_addr = (u8 __iomem *)pf->hw.hw_addr;
-	port_info = pf->hw.port_info;
-	vsi = pf->vsi[0];
-	peer_dev->pf_vsi_num = vsi->vsi_num;
-	peer_dev->netdev = vsi->netdev;
-	peer_dev->initial_mtu = vsi->netdev->mtu;
-	ether_addr_copy(peer_dev->lan_addr, port_info->mac.lan_addr);
-
 	/* There will be several assessments of the peer_dev's state in this
 	 * chunk of logic.  We need to hold the peer_dev_int's state mutex
 	 * for the entire part so that the flow progresses without another
 	 * context changing things mid-flow
 	 */
 	mutex_lock(&peer_dev_int->peer_dev_state_mutex);
-	/* Call the probe only if peer_dev is in _INIT  state */
-	if (test_bit(ICE_PEER_DEV_STATE_INIT, peer_dev_int->state)) {
-		/* Mark the state as _PROBE */
-		ice_peer_state_change(peer_dev_int, ICE_PEER_DEV_STATE_PROBE,
-				      true);
-
-		/* Initiate peer driver probe/open */
-		if (!peer_drv->probe) {
-			dev_err(&pf->pdev->dev,
-				"probe not defined for peer device (%s)\n",
-				dev->driver->name ? dev->driver->name : "");
-			ice_peer_state_change(peer_dev_int,
-					      ICE_PEER_DEV_STATE_INIT, true);
-			ret = -EINVAL;
-			goto init_unlock;
-		}
-		ret = peer_drv->probe(peer_dev);
-		if (ret) {
-			dev_err(&pf->pdev->dev,
-				"probe failed for peer device (%s), err %d\n",
-				dev->driver->name ? dev->driver->name : "",
-				ret);
-			ice_peer_state_change(peer_dev_int,
-					      ICE_PEER_DEV_STATE_INIT, true);
-			goto init_unlock;
-		}
-		ice_peer_state_change(peer_dev_int, ICE_PEER_DEV_STATE_PROBED,
-				      true);
-	}
 
 	if (!peer_dev->peer_ops) {
 		dev_err(&pf->pdev->dev,
-			"peer_ops not defined on peer dev (%s)\n",
-			dev->driver->name ? dev->driver->name : "");
-		ret = 0;
+			"peer_ops not defined on peer dev\n");
 		goto init_unlock;
 	}
 
 	if (!peer_dev->peer_ops->open) {
 		dev_err(&pf->pdev->dev,
-			"peer_ops:open not defined on peer dev (%s)\n",
-			dev->driver->name ? dev->driver->name : "");
-		ret = 0;
+			"peer_ops:open not defined on peer dev\n");
 		goto init_unlock;
 	}
 
 	if (!peer_dev->peer_ops->close) {
 		dev_err(&pf->pdev->dev,
-			"peer_ops:close not defined on peer dev (%s)\n",
-			dev->driver->name ? dev->driver->name : "");
-		ret = 0;
+			"peer_ops:close not defined on peer dev\n");
 		goto init_unlock;
 	}
 
 	/* Peer driver expected to set driver_id during registration */
 	if (!peer_drv->driver_id) {
 		dev_err(&pf->pdev->dev,
-			"Peer driver (%s) did not set driver_id\n",
-			dev->driver->name);
-		ret = 0;
+			"Peer driver did not set driver_id\n");
 		goto init_unlock;
 	}
 
@@ -683,8 +426,8 @@ int ice_finish_init_peer_device(struct device *dev, void __always_unused *data)
 		peer_dev->peer_ops->open(peer_dev);
 		ice_peer_state_change(peer_dev_int, ICE_PEER_DEV_STATE_OPENED,
 				      true);
-		ret = bus_for_each_dev(&ice_peer_bus, NULL, peer_dev,
-				       ice_check_peer_for_events);
+		ret = ice_for_each_peer(pf, peer_dev,
+					ice_check_peer_for_events);
 		ice_check_peer_drv_for_events(peer_dev);
 	}
 
@@ -696,34 +439,21 @@ init_unlock:
 
 /**
  * ice_unreg_peer_device - unregister specified device
- * @dev: ptr to peer device
+ * @peer_dev_int: ptr to peer device internal
  * @data: ptr to opaque data
  *
  * This function invokes device unregistration, removes ID associated with
  * the specified device.
  */
-int ice_unreg_peer_device(struct device *dev, void __always_unused *data)
+int ice_unreg_peer_device(struct ice_peer_dev_int *peer_dev_int,
+			  void __always_unused *data)
 {
-	struct ice_peer_dev_int *peer_dev_int;
-
-	/* This is the function invoked from ice_remove
-	 * code-path, it eventually comes from device_for_each_child
-	 * No reason to prohibit calling device_unregister because this is the
-	 * last chance to trigger cleanup of devices by unregistering them
-	 * from the bus. Actual cleanup of resources such as memory for peer_dev
-	 * is cleaned up from "dev.release function".
-	 */
-	if (!dev)
-		return -EINVAL;
-
-	device_unregister(dev);
+	platform_device_unregister(&peer_dev_int->peer_dev.platform_dev);
 
 	/* Don't need additional validity checks here - these are really just
 	 * container_of calls so if dev is valid, peer_dev_int will be valid
 	 * as well.
 	 */
-	peer_dev_int = peer_to_ice_dev_int(dev_to_ice_peer(dev));
-
 	if (peer_dev_int->ice_peer_wq) {
 		if (peer_dev_int->peer_prep_task.func)
 			cancel_work_sync(&peer_dev_int->peer_prep_task);
@@ -736,61 +466,32 @@ int ice_unreg_peer_device(struct device *dev, void __always_unused *data)
 	/* Cleanup the allocated ID for this peer device */
 	ida_simple_remove(&ice_peer_index_ida, peer_dev_int->peer_dev.index);
 
+	devm_kfree(&peer_dev_int->peer_dev.pdev->dev, peer_dev_int);
+
 	return 0;
 }
 
 /**
  * ice_unroll_peer - destroy peers and peer_wq in case of error
- * @dev: ptr to peer device
+ * @peer_dev_int: ptr to peer device internal struct
  * @data: ptr to opaque data
  *
  * This function releases resources in the event of a failure in creating
  * peer devices or their individual work_queues. Meant to be called from
  * a bus_for_each_device invocation
  */
-int ice_unroll_peer(struct device *dev, void __always_unused *data)
+int ice_unroll_peer(struct ice_peer_dev_int *peer_dev_int,
+		    void __always_unused *data)
 {
-	struct ice_peer_dev_int *peer_dev_int;
+	struct ice_pf *pf;
 
-	if (!ice_validate_peer(dev, false))
-		return -EINVAL;
-
-	peer_dev_int = peer_to_ice_dev_int(dev_to_ice_peer(dev));
+	pf = pci_get_drvdata(peer_dev_int->peer_dev.pdev);
 
 	if (peer_dev_int->ice_peer_wq)
 		destroy_workqueue(peer_dev_int->ice_peer_wq);
-	devm_kfree(dev->parent, peer_dev_int);
+	devm_kfree(&pf->pdev->dev, peer_dev_int);
 
 	return 0;
-}
-
-/* static initialization of device IDs for different peer devices */
-static const struct ice_peer_device_id peer_device_ids[] = {
-	{.vendor = PCI_VENDOR_ID_INTEL,
-	 .device = ICE_PEER_RDMA_DEV},
-};
-
-/**
- * ice_peer_dev_release - Release peer device object
- * @dev: ptr to device object
- *
- * This function is invoked from device_unregister codepath. If peer
- * device doesn't have 'release' function, WARN is trigger due to
- * 'release' function being NULL. This function to release device
- * specific resources and release peer device object memory.
- */
-static void ice_peer_dev_release(struct device *dev)
-{
-	struct ice_peer_dev_int *peer_dev_int;
-	struct ice_peer_dev *peer_dev;
-
-	peer_dev = dev_to_ice_peer(dev);
-	if (!peer_dev)
-		return;
-	peer_dev_int = peer_to_ice_dev_int(peer_dev);
-	if (!peer_dev_int)
-		return;
-	devm_kfree(dev->parent, peer_dev_int);
 }
 
 /**
@@ -1044,18 +745,19 @@ static void
 ice_peer_reg_for_notif(struct ice_peer_dev *peer_dev, struct ice_event *events)
 {
 	struct ice_peer_dev_int *peer_dev_int;
+	struct ice_pf *pf;
 
 	if (!ice_validate_peer_dev(peer_dev) || !events)
 		return;
 
 	peer_dev_int = peer_to_ice_dev_int(peer_dev);
+	pf = pci_get_drvdata(peer_dev->pdev);
 
 	bitmap_or(peer_dev_int->events, peer_dev_int->events, events->type,
 		  ICE_EVENT_NBITS);
 
 	/* Check to see if any events happened previous to peer registering */
-	bus_for_each_dev(&ice_peer_bus, NULL, peer_dev,
-			 ice_check_peer_for_events);
+	ice_for_each_peer(pf, peer_dev, ice_check_peer_for_events);
 	ice_check_peer_drv_for_events(peer_dev);
 }
 
@@ -1081,28 +783,26 @@ ice_peer_unreg_for_notif(struct ice_peer_dev *peer_dev,
 
 /**
  * ice_peer_check_for_reg - check to see if any peers are reg'd for event
- * @dev: ptr to peer device
+ * @peer_dev_int: ptr to peer device internal struct
  * @data: ptr to opaque data, to be used for ice_event to report
  *
  * This function is to be called by device_for_each_child to handle an
  * event reported by a peer or the ice driver.
  */
-int ice_peer_check_for_reg(struct device *dev, void *data)
+int ice_peer_check_for_reg(struct ice_peer_dev_int *peer_dev_int, void *data)
 {
-	struct ice_peer_dev_int *peer_dev_int;
 	struct ice_event *event = (struct ice_event *)data;
 	DECLARE_BITMAP(comp_events, ICE_EVENT_NBITS);
 	struct ice_peer_dev *peer_dev;
 	bool check = true;
 
-	if (!ice_validate_peer(dev, true) || !data)
+	peer_dev = &peer_dev_int->peer_dev;
+
+	if (!ice_validate_peer_dev(peer_dev) || !data)
 	/* If invalid dev, in this case return 0 instead of error
 	 * because caller ignores this return value
 	 */
 		return 0;
-
-	peer_dev = dev_to_ice_peer(dev);
-	peer_dev_int = peer_to_ice_dev_int(peer_dev);
 
 	if (event->reporter)
 		check = event->reporter->index != peer_dev->index;
@@ -1134,12 +834,14 @@ ice_peer_report_state_change(struct ice_peer_dev *peer_dev,
 	struct ice_peer_dev_int *peer_dev_int;
 	struct ice_peer_drv_int *peer_drv_int;
 	struct ice_peer_drv *peer_drv;
+	struct ice_pf *pf;
 	int e_type, drv_event = 0;
 
 	if (!ice_validate_peer_dev(peer_dev) || !event)
 		return;
 
-	peer_drv = drv_to_ice_peer(peer_dev->dev.driver);
+	pf = pci_get_drvdata(peer_dev->pdev);
+	peer_drv = peer_dev->peer_drv;
 	peer_dev_int = peer_to_ice_dev_int(peer_dev);
 	peer_drv_int = peer_to_ice_drv_int(peer_drv);
 
@@ -1181,7 +883,7 @@ ice_peer_report_state_change(struct ice_peer_dev *peer_dev,
 		memcpy(&peer_dev_int->current_events[e_type], event,
 		       sizeof(*event));
 
-	bus_for_each_dev(&ice_peer_bus, NULL, event, ice_peer_check_for_reg);
+	ice_for_each_peer(pf, event, ice_peer_check_for_reg);
 }
 
 /**
@@ -1195,7 +897,6 @@ static int ice_peer_dev_uninit(struct ice_peer_dev *peer_dev)
 {
 	enum ice_close_reason reason = ICE_REASON_PEER_DEV_UNINIT;
 	struct ice_peer_dev_int *peer_dev_int;
-	struct ice_peer_drv *peer_drv;
 	struct ice_pf *pf;
 	int ret;
 
@@ -1206,56 +907,82 @@ static int ice_peer_dev_uninit(struct ice_peer_dev *peer_dev)
 	if (ice_is_reset_in_progress(pf->state))
 		return -EBUSY;
 
-	peer_drv = drv_to_ice_peer(peer_dev->dev.driver);
-
 	peer_dev_int = peer_to_ice_dev_int(peer_dev);
 
-	ret = ice_peer_close(&peer_dev->dev, &reason);
+	ret = ice_peer_close(peer_dev_int, &reason);
 	if (ret)
 		return ret;
 
-	ret = peer_drv->remove(peer_dev);
-	if (!ret)
-		ice_peer_state_change(peer_dev_int, ICE_PEER_DEV_STATE_REMOVED,
-				      false);
+	peer_dev->peer_ops = NULL;
+
+	ice_peer_state_change(peer_dev_int, ICE_PEER_DEV_STATE_REMOVED, false);
 
 	return ret;
 }
 
 /**
- * ice_peer_dev_reinit - request to reinitialize peer
- * @peer_dev: peer device
+ * ice_peer_probe_finished - Called by peer to open communication with LAN
+ * @peer_dev: ptr to peer device
  *
- * This function resets peer_dev state to 'INIT' that causes a
- * re-probe/open on peer_dev from service task
+ * registering peer is expected to populate the ice_peerdrv->name field
+ * before calling this function.
  */
-static int ice_peer_dev_reinit(struct ice_peer_dev *peer_dev)
+static int ice_peer_probe_finished(struct ice_peer_dev *peer_dev)
 {
+	struct ice_peer_drv_int *peer_drv_int;
 	struct ice_peer_dev_int *peer_dev_int;
-	struct ice_pf *pf;
+	struct ice_peer_drv *peer_drv;
+	int i;
 
-	/* We can't call ice_validate_peer_dev here because the state check
-	 * will fail. Just open-code some validity checks instead.
-	 */
-	if (!peer_dev || !peer_dev->pdev)
+	if (!peer_dev) {
+		pr_err("Failed to reg peer dev: peer_dev ptr NULL\n");
 		return -EINVAL;
+	}
 
-	pf = pci_get_drvdata(peer_dev->pdev);
-	if (!pf)
+	if (!peer_dev->pdev) {
+		pr_err("Failed to reg peer dev: peer dev pdev NULL\n");
 		return -EINVAL;
+	}
 
-	if (!ice_pf_state_is_nominal(pf))
-		return -EBUSY;
+	if (!peer_dev->peer_ops || !peer_dev->ops) {
+		pr_err("Failed to reg peer dev: peer dev peer_ops/ops NULL\n");
+		return -EINVAL;
+	}
+
+	peer_drv = peer_dev->peer_drv;
+	if (!peer_drv) {
+		pr_err("Failed to reg peer dev: peer drv NULL\n");
+		return -EINVAL;
+	}
+
+	if (peer_drv->ver.major != ICE_PEER_MAJOR_VER ||
+	    peer_drv->ver.minor != ICE_PEER_MINOR_VER) {
+		pr_err("failed to register due to version mismatch:\n");
+		pr_err("expected major ver %d, caller specified major ver %d\n",
+		       ICE_PEER_MAJOR_VER, peer_drv->ver.major);
+		pr_err("expected minor ver %d, caller specified minor ver %d\n",
+		       ICE_PEER_MINOR_VER, peer_drv->ver.minor);
+		return -EINVAL;
+	}
+
+	peer_drv_int = kzalloc(sizeof(*peer_drv_int), GFP_KERNEL);
+	if (!peer_drv_int)
+		return -ENOMEM;
+
+	peer_drv_int->peer_drv = peer_drv;
+	INIT_LIST_HEAD(&peer_drv_int->drv_int_list);
+
+	mutex_lock(&ice_peer_drv_mutex);
+	list_add(&peer_drv_int->drv_int_list, &ice_peer_drv_list);
+	mutex_unlock(&ice_peer_drv_mutex);
+
+	/* Initialize driver values */
+	for (i = 0; i < ICE_EVENT_NBITS; i++)
+		bitmap_zero(peer_drv_int->current_events[i].type,
+			    ICE_EVENT_NBITS);
 
 	peer_dev_int = peer_to_ice_dev_int(peer_dev);
-	if (!peer_dev_int)
-		return -EINVAL;
-
-	if (test_bit(ICE_PEER_DEV_STATE_REMOVED, peer_dev_int->state))
-		ice_peer_state_change(peer_dev_int, ICE_PEER_DEV_STATE_INIT,
-				      false);
-	else
-		return -EINVAL;
+	ice_peer_state_change(peer_dev_int, ICE_PEER_DEV_STATE_PROBED, false);
 
 	return 0;
 }
@@ -1372,8 +1099,8 @@ static const struct ice_ops ops = {
 	.unreg_for_notification		= ice_peer_unreg_for_notif,
 	.notify_state_change		= ice_peer_report_state_change,
 	.request_reset			= ice_peer_request_reset,
+	.probe_finished			= ice_peer_probe_finished,
 	.request_uninit			= ice_peer_dev_uninit,
-	.request_reinit			= ice_peer_dev_reinit,
 	.update_vsi_filter		= ice_peer_update_vsi_filter,
 	.vc_send			= ice_peer_vc_send,
 
@@ -1436,6 +1163,27 @@ static void ice_peer_close_task(struct work_struct *work)
 }
 
 /**
+ * ice_peer_device_release - release function for platform peer device
+ * @dev: pointer to device structure
+ *
+ * This callback function is accessed by platform bus infrastructure when
+ * all references on the peer platform device we registered are removed
+ * (e.g. the peer priver has been removed).  We will use this opportunity
+ * to set the peer's state to init to be ready if the peer driver re-loads.
+ */
+void ice_peer_device_release(struct device *dev)
+{
+	struct ice_peer_dev_int *peer_dev_int;
+	struct ice_peer_dev *peer_dev;
+
+	peer_dev = dev_to_ice_peer(dev);
+	peer_dev_int = container_of(peer_dev, struct ice_peer_dev_int,
+				    peer_dev);
+
+	ice_peer_state_change(peer_dev_int, ICE_PEER_DEV_STATE_INIT, false);
+}
+
+/**
  * ice_init_peer_devices - initializes peer devices
  * @pf: ptr to ice_pf
  *
@@ -1446,6 +1194,8 @@ int ice_init_peer_devices(struct ice_pf *pf)
 {
 	struct pci_dev *pdev = pf->pdev;
 	struct msix_entry *entry = NULL;
+	struct ice_port_info *port_info;
+	struct ice_vsi *vsi;
 	int status = 0;
 	int i;
 
@@ -1456,8 +1206,9 @@ int ice_init_peer_devices(struct ice_pf *pf)
 			"failed to reserve vectors for peer drivers\n");
 		return status;
 	}
-	for (i = 0; i < ARRAY_SIZE(peer_device_ids); i++) {
+	for (i = 0; i < ARRAY_SIZE(peer_dev_ids); i++) {
 		struct ice_peer_dev_int *peer_dev_int;
+		struct platform_device *platform_dev;
 		struct ice_qos_params *qos_info;
 		struct ice_peer_dev *peer_dev;
 		int j;
@@ -1466,9 +1217,29 @@ int ice_init_peer_devices(struct ice_pf *pf)
 					    GFP_KERNEL);
 		if (!peer_dev_int)
 			return -ENOMEM;
+		pf->peers[i] = peer_dev_int;
+
+		mutex_init(&peer_dev_int->peer_dev_state_mutex);
 
 		peer_dev = &peer_dev_int->peer_dev;
 		peer_dev->peer_ops = NULL;
+		peer_dev->hw_addr = (u8 __iomem *)pf->hw.hw_addr;
+		peer_dev->ver.major = ICE_PEER_MAJOR_VER;
+		peer_dev->ver.minor = ICE_PEER_MINOR_VER;
+		peer_dev->ver.support = ICE_IDC_FEATURES;
+		peer_dev->peer_dev_id = peer_dev_ids[i].id;
+		port_info = pf->hw.port_info;
+		vsi = pf->vsi[0];
+		peer_dev->pf_vsi_num = vsi->vsi_num;
+		peer_dev->netdev = vsi->netdev;
+		peer_dev->initial_mtu = vsi->netdev->mtu;
+		ether_addr_copy(peer_dev->lan_addr, port_info->mac.lan_addr);
+
+		platform_dev = &peer_dev->platform_dev;
+		platform_dev->name = peer_dev_ids[i].name;
+		platform_dev->id = PLATFORM_DEVID_AUTO;
+		platform_dev->id_auto = true;
+		platform_dev->dev.release = ice_peer_device_release;
 		peer_dev_int->ice_peer_wq =
 			alloc_ordered_workqueue("ice_peer_wq_%d", WQ_UNBOUND,
 						i);
@@ -1480,14 +1251,11 @@ int ice_init_peer_devices(struct ice_pf *pf)
 		status = ida_simple_get(&ice_peer_index_ida, 0, 0, GFP_KERNEL);
 		if (status < 0) {
 			dev_err(&pdev->dev,
-				"failed to get unique index for device (ID: 0x%04x)\n",
-				peer_dev->dev_id.device);
+				"failed to get unique index for device\n");
 			devm_kfree(&pdev->dev, peer_dev);
 			return status;
 		}
 		peer_dev->index = status;
-		dev_set_name(&peer_dev->dev, "ice_peer_%u",
-			     peer_dev->index);
 		peer_dev->pdev = pdev;
 		peer_dev->ari_ena = pci_ari_enabled(pdev->bus);
 		peer_dev->bus_num = PCI_BUS_NUM(pdev->devfn);
@@ -1512,22 +1280,18 @@ int ice_init_peer_devices(struct ice_pf *pf)
 		for (j = 1; j < IEEE_8021QAZ_MAX_TCS; j++)
 			qos_info->tc_info[j].rel_bw = 0;
 
+#ifdef CONFIG_DCB
 		/* for DCB, override the qos_info defaults. */
 		ice_setup_dcb_qos_info(pf, qos_info);
 
-		peer_dev->dev_id.vendor = peer_device_ids[i].vendor;
-		peer_dev->dev_id.device = peer_device_ids[i].device;
-		peer_dev->dev.release = ice_peer_dev_release;
-		peer_dev->dev.parent = &pdev->dev;
-		peer_dev->dev.bus = &ice_peer_bus;
-
+#endif /* CONFIG_DCB */
 		/* Initialize ice_ops */
 		peer_dev->ops = &ops;
 
 		/* make sure peer specific resources such as msix_count and
 		 * msix_entries are initialized
 		 */
-		switch (peer_dev->dev_id.device) {
+		switch (peer_dev_ids[i].id) {
 		case ICE_PEER_RDMA_DEV:
 			if (test_bit(ICE_FLAG_IWARP_ENA, pf->flags)) {
 				peer_dev->msix_count = pf->num_rdma_msix;
@@ -1539,135 +1303,16 @@ int ice_init_peer_devices(struct ice_pf *pf)
 		}
 
 		peer_dev->msix_entries = entry;
-
-		/* device_register() causes the bus infrastructure to look for
-		 * a matching driver
-		 */
-		status = device_register(&peer_dev->dev);
+		ice_peer_state_change(peer_dev_int, ICE_PEER_DEV_STATE_INIT,
+				      false);
+		status = platform_device_register(platform_dev);
 		if (status) {
-			dev_err(&pdev->dev,
-				"failed to register device (ID: 0x%04x)\n",
-				peer_dev->dev_id.device);
-			ida_simple_remove(&ice_peer_index_ida,
-					  peer_dev->index);
-			put_device(&peer_dev->dev);
-			devm_kfree(&pdev->dev, peer_dev);
-			break;
+			pr_err("Failed to register peer device %s\n",
+			       platform_dev->name);
+			return status;
 		}
 	}
 
 	return status;
 }
 
-/**
- * ice_reg_peer_driver - register peer driver
- * @drv: ptr to peer driver
- *
- * This is the registration function for peer drivers, which invokes
- * OS specific driver registration to trigger bus infrastructure. This
- * exported symbol to be invoked by peer drivers.
- *
- * registering peer is expected to populate the ice_peerdrv->name field
- * before calling this function.
- */
-int ice_reg_peer_driver(struct ice_peer_drv *drv)
-{
-	struct ice_peer_drv_int *peer_drv_int;
-	int ret, i;
-
-	if (!drv) {
-		pr_err("Failed to reg peer drv: drv ptr NULL\n");
-		return -EINVAL;
-	}
-
-	if (!drv->name) {
-		pr_err("Failed to reg peer drv: peer drv name NULL\n");
-		return -EINVAL;
-	}
-
-	if (!drv->driver.owner || !drv->driver.mod_name) {
-		pr_err("Fail reg peer drv: peer drv owner or mod_name NULL\n");
-		return -EINVAL;
-	}
-
-	if (drv->ver.major != ICE_PEER_MAJOR_VER ||
-	    drv->ver.minor != ICE_PEER_MINOR_VER) {
-		pr_err("failed to register due to version mismatch:\n");
-		pr_err("expected major ver %d, caller specified major ver %d\n",
-		       ICE_PEER_MAJOR_VER, drv->ver.major);
-		pr_err("expected minor ver %d, caller specified minor ver %d\n",
-		       ICE_PEER_MINOR_VER, drv->ver.minor);
-		return -EINVAL;
-	}
-
-	if (!drv->remove) {
-		pr_err("failed to register due to lack of remove API\n");
-		return -EINVAL;
-	}
-
-	if (!drv->probe) {
-		pr_err("failed to register due to lack of probe API\n");
-		return -EINVAL;
-	}
-
-	peer_drv_int = kzalloc(sizeof(*peer_drv_int), GFP_KERNEL);
-	if (!peer_drv_int)
-		return -ENOMEM;
-
-	peer_drv_int->peer_drv = drv;
-	INIT_LIST_HEAD(&peer_drv_int->drv_int_list);
-
-	mutex_lock(&ice_peer_drv_mutex);
-	list_add(&peer_drv_int->drv_int_list, &ice_peer_drv_list);
-	mutex_unlock(&ice_peer_drv_mutex);
-
-	/* Initialize driver values */
-	for (i = 0; i < ICE_EVENT_NBITS; i++)
-		bitmap_zero(peer_drv_int->current_events[i].type,
-			    ICE_EVENT_NBITS);
-
-	drv->driver.bus = &ice_peer_bus;
-
-	ret = driver_register(&drv->driver);
-	if (ret) {
-		pr_err("Failed to register peer driver %d\n", ret);
-		mutex_lock(&ice_peer_drv_mutex);
-		list_del(&peer_drv_int->drv_int_list);
-		mutex_unlock(&ice_peer_drv_mutex);
-		kfree(peer_drv_int);
-	}
-
-	return ret;
-}
-
-/**
- * ice_unreg_peer_driver - unregister peer driver
- * @drv: ptr to peer driver
- *
- * This is the unregistration function for peer drivers, which invokes
- * OS specific driver unregistration to trigger bus infrastructure. This
- * exported symbol to be invoked by peer drivers.
- */
-int ice_unreg_peer_driver(struct ice_peer_drv *drv)
-{
-	struct ice_peer_drv_int *peer_drv_int;
-
-	if (!drv || !drv->driver.owner) {
-		pr_err("Fail unregister peer driver: driver or mod ptr NULL\n");
-		return -ENODEV;
-	}
-
-	peer_drv_int = peer_to_ice_drv_int(drv);
-	if (!peer_drv_int)
-		return -ENODEV;
-
-	mutex_lock(&ice_peer_drv_mutex);
-	list_del(&peer_drv_int->drv_int_list);
-	mutex_unlock(&ice_peer_drv_mutex);
-
-	kfree(peer_drv_int);
-
-	driver_unregister(&drv->driver);
-
-	return 0;
-}

@@ -576,8 +576,7 @@ static void ice_reset_subtask(struct ice_pf *pf)
 		/* return if no valid reset type requested */
 		if (reset_type == ICE_RESET_INVAL)
 			return;
-		bus_for_each_dev(&ice_peer_bus, NULL, &reset_type,
-				 ice_close_peer_for_reset);
+		ice_for_each_peer(pf, &reset_type, ice_close_peer_for_reset);
 		ice_prepare_for_reset(pf);
 
 		/* make sure we are ready to rebuild */
@@ -1339,8 +1338,7 @@ static void ice_service_task(struct work_struct *work)
 	}
 
 	/* Invoke remaining initialization of peer devices */
-	bus_for_each_dev(&ice_peer_bus, NULL, NULL,
-			 ice_finish_init_peer_device);
+	ice_for_each_peer(pf, NULL, ice_finish_init_peer_device);
 
 	ice_check_for_hang_subtask(pf);
 	ice_sync_fltr_subtask(pf);
@@ -1846,12 +1844,6 @@ static int ice_cfg_netdev(struct ice_vsi *vsi)
 	vsi->netdev = netdev;
 	np = netdev_priv(netdev);
 	np->vsi = vsi;
-	np->prov_callbacks.signature = IDC_SIGNATURE;
-	np->prov_callbacks.maj_ver = ICE_PEER_MAJOR_VER;
-	np->prov_callbacks.min_ver = ICE_PEER_MINOR_VER;
-	memset(np->prov_callbacks.rsvd, 0, sizeof(np->prov_callbacks.rsvd));
-	np->prov_callbacks.reg_peer_driver = ice_reg_peer_driver;
-	np->prov_callbacks.unreg_peer_driver = ice_unreg_peer_driver;
 
 	dflt_features = NETIF_F_SG	|
 			NETIF_F_HIGHDMA	|
@@ -2422,6 +2414,15 @@ ice_probe(struct pci_dev *pdev, const struct pci_device_id __always_unused *ent)
 
 	ice_init_pf(pf);
 
+	pf->peers = devm_kcalloc(dev, ICE_MAX_NUM_PEERS, sizeof(*pf->peers),
+				 GFP_KERNEL);
+	if (!pf->peers) {
+		dev_err(dev, "Failed to allocate pointers for peer devices\n");
+		err = -ENOMEM;
+		goto err_init_peer_unroll;
+	}
+
+	mutex_init(&ice_peer_drv_mutex);
 	err = ice_init_pf_dcb(pf, false);
 	if (err) {
 		clear_bit(ICE_FLAG_DCB_CAPABLE, pf->flags);
@@ -2516,7 +2517,7 @@ ice_probe(struct pci_dev *pdev, const struct pci_device_id __always_unused *ent)
 
 	/* Unwind non-managed device resources, etc. if something failed */
 err_init_peer_unroll:
-	bus_for_each_dev(&ice_peer_bus, NULL, NULL, ice_unroll_peer);
+	ice_for_each_peer(pf, NULL, ice_unroll_peer);
 err_alloc_sw_unroll:
 	set_bit(__ICE_SERVICE_DIS, pf->state);
 	set_bit(__ICE_DOWN, pf->state);
@@ -2555,13 +2556,13 @@ static void ice_remove(struct pci_dev *pdev)
 
 	ice_service_task_stop(pf);
 	reason = ICE_REASON_INTERFACE_DOWN;
-	bus_for_each_dev(&ice_peer_bus, NULL, &reason, ice_peer_close);
+	ice_for_each_peer(pf, &reason, ice_peer_close);
 	set_bit(__ICE_DOWN, pf->state);
 
 	if (test_bit(ICE_FLAG_SRIOV_ENA, pf->flags))
 		ice_free_vfs(pf);
 	ice_vsi_release_all(pf);
-	bus_for_each_dev(&ice_peer_bus, NULL, NULL, ice_unreg_peer_device);
+	ice_for_each_peer(pf, NULL, ice_unreg_peer_device);
 	ice_free_irq_msix_misc(pf);
 	ice_for_each_vsi(pf, i) {
 		if (!pf->vsi[i])
@@ -2751,16 +2752,9 @@ static int __init ice_module_init(void)
 	pr_info("%s - version %s\n", ice_driver_string, ice_drv_ver);
 	pr_info("%s\n", ice_copyright);
 
-	status = bus_register(&ice_peer_bus);
-	if (status) {
-		pr_err("failed to register pseudo bus\n");
-		return status;
-	}
-
 	ice_wq = alloc_workqueue("%s", WQ_MEM_RECLAIM, 0, KBUILD_MODNAME);
 	if (!ice_wq) {
 		pr_err("Failed to create workqueue\n");
-		bus_unregister(&ice_peer_bus);
 		return -ENOMEM;
 	}
 
@@ -2768,10 +2762,6 @@ static int __init ice_module_init(void)
 	if (status) {
 		pr_err("failed to register PCI driver, err %d\n", status);
 		destroy_workqueue(ice_wq);
-		bus_unregister(&ice_peer_bus);
-		/* release all cached layer within ida tree, associated with
-		 * ice_peer_index_ida object
-		 */
 		ida_destroy(&ice_peer_index_ida);
 	}
 
@@ -2798,8 +2788,6 @@ static void __exit ice_module_exit(void)
 		kfree(peer_drv_int);
 	}
 	mutex_unlock(&ice_peer_drv_mutex);
-
-	bus_unregister(&ice_peer_bus);
 
 	/* release all cached layer within ida tree, associated with
 	 * ice_peer_index_ida object
@@ -4073,7 +4061,7 @@ static int ice_change_mtu(struct net_device *netdev, int new_mtu)
 	set_bit(ICE_EVENT_MTU_CHANGE, event->type);
 	event->reporter = NULL;
 	event->info.mtu = new_mtu;
-	bus_for_each_dev(&ice_peer_bus, NULL, event, ice_peer_check_for_reg);
+	ice_for_each_peer(pf, event, ice_peer_check_for_reg);
 	devm_kfree(&pf->pdev->dev, event);
 
 	netdev_info(netdev, "changed MTU to %d\n", new_mtu);

@@ -9,17 +9,19 @@
 #define ICE_IDC_MAX_STATE_WAIT	12
 extern struct list_head ice_peer_drv_list;
 extern struct mutex ice_peer_drv_mutex; /* control access to list of peer_drv */
-int ice_prep_peer_for_reset(struct device *dev, void *data);
-int ice_close_peer_for_reset(struct device *dev, void *data);
-int ice_unroll_peer(struct device *dev, void *data);
-int ice_unreg_peer_device(struct device *dev, void *data);
-int ice_peer_close(struct device *dev, void *data);
-int ice_peer_check_for_reg(struct device *dev, void *data);
-int ice_finish_init_peer_device(struct device *dev, void *data);
+int ice_prep_peer_for_reset(struct ice_peer_dev_int *peer_dev_int, void *data);
+int ice_close_peer_for_reset(struct ice_peer_dev_int *peer_dev_int, void *data);
+int ice_unroll_peer(struct ice_peer_dev_int *peer_dev_int, void *data);
+int ice_unreg_peer_device(struct ice_peer_dev_int *peer_dev_int, void *data);
+int ice_peer_close(struct ice_peer_dev_int *peer_dev_int, void *data);
+int ice_peer_check_for_reg(struct ice_peer_dev_int *peer_dev_int, void *data);
+int ice_finish_init_peer_device(struct ice_peer_dev_int *peer_dev_int,
+				void *data);
+bool ice_validate_peer_dev(struct ice_peer_dev *peer);
+void ice_peer_device_release(struct device *dev);
 
 enum ice_peer_dev_state {
 	ICE_PEER_DEV_STATE_INIT,
-	ICE_PEER_DEV_STATE_PROBE,
 	ICE_PEER_DEV_STATE_PROBED,
 	ICE_PEER_DEV_STATE_OPENING,
 	ICE_PEER_DEV_STATE_OPENED,

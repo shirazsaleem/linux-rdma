@@ -1472,7 +1472,7 @@ int ice_add_mac_to_list(struct ice_vsi *vsi, struct list_head *add_list,
  * the PF is in a state that would inhibit normal operation for
  * driver functionality.
  *
- * Returns true if PF is in a nominal state
+ * Returns true if PF is in a nominal state.
  * Returns false otherwise
  */
 bool ice_pf_state_is_nominal(struct ice_pf *pf)
@@ -2714,8 +2714,7 @@ void ice_vsi_close(struct ice_vsi *vsi)
 	int ret = 0;
 
 	if (vsi->type == ICE_VSI_PF)
-		ret = bus_for_each_dev(&ice_peer_bus, NULL, &reason,
-				       ice_peer_close);
+		ret = ice_for_each_peer(vsi->back, &reason, ice_peer_close);
 
 	if (ret)
 		dev_dbg(dev, "Peer device did not implement close function\n");
