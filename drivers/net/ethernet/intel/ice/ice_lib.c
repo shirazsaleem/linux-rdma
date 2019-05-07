@@ -1465,6 +1465,31 @@ int ice_add_mac_to_list(struct ice_vsi *vsi, struct list_head *add_list,
 }
 
 /**
+ * ice_pf_state_is_nominal - checks the PF for nominal state
+ * @pf: pointer to PF to check
+ *
+ * Check the PF's state for a collection of bits that would indicate
+ * the PF is in a state that would inhibit normal operation for
+ * driver functionality.
+ *
+ * Returns true if PF is in a nominal state
+ * Returns false otherwise
+ */
+bool ice_pf_state_is_nominal(struct ice_pf *pf)
+{
+	DECLARE_BITMAP(check_bits, __ICE_STATE_NBITS) = { 0 };
+
+	if (!pf)
+		return false;
+
+	bitmap_set(check_bits, 0, __ICE_STATE_NOMINAL_CHECK_BITS);
+	if (bitmap_intersects(pf->state, check_bits, __ICE_STATE_NBITS))
+		return false;
+
+	return true;
+}
+
+/**
  * ice_update_eth_stats - Update VSI-specific ethernet statistics counters
  * @vsi: the VSI to be updated
  */
@@ -2684,9 +2709,18 @@ void ice_vsi_free_rx_rings(struct ice_vsi *vsi)
  */
 void ice_vsi_close(struct ice_vsi *vsi)
 {
+	enum ice_close_reason reason = ICE_REASON_INTERFACE_DOWN;
+	struct device *dev = &vsi->back->pdev->dev;
+	int ret = 0;
+
+	if (vsi->type == ICE_VSI_PF)
+		ret = bus_for_each_dev(&ice_peer_bus, NULL, &reason,
+				       ice_peer_close);
+
+	if (ret)
+		dev_dbg(dev, "Peer device did not implement close function\n");
 	if (!test_and_set_bit(__ICE_DOWN, vsi->state))
 		ice_down(vsi);
-
 	ice_vsi_free_irq(vsi);
 	ice_vsi_free_tx_rings(vsi);
 	ice_vsi_free_rx_rings(vsi);

@@ -576,6 +576,8 @@ static void ice_reset_subtask(struct ice_pf *pf)
 		/* return if no valid reset type requested */
 		if (reset_type == ICE_RESET_INVAL)
 			return;
+		bus_for_each_dev(&ice_peer_bus, NULL, &reset_type,
+				 ice_close_peer_for_reset);
 		ice_prepare_for_reset(pf);
 
 		/* make sure we are ready to rebuild */
@@ -1336,6 +1338,10 @@ static void ice_service_task(struct work_struct *work)
 		return;
 	}
 
+	/* Invoke remaining initialization of peer devices */
+	bus_for_each_dev(&ice_peer_bus, NULL, NULL,
+			 ice_finish_init_peer_device);
+
 	ice_check_for_hang_subtask(pf);
 	ice_sync_fltr_subtask(pf);
 	ice_handle_mdd_event(pf);
@@ -1373,6 +1379,42 @@ static void ice_set_ctrlq_len(struct ice_hw *hw)
 	hw->mailboxq.num_sq_entries = ICE_MBXQ_LEN;
 	hw->mailboxq.rq_buf_size = ICE_MBXQ_MAX_BUF_LEN;
 	hw->mailboxq.sq_buf_size = ICE_MBXQ_MAX_BUF_LEN;
+}
+
+/**
+ * ice_schedule_reset - schedule a reset
+ * @pf: board private structure
+ * @reset: reset being requested
+ */
+int ice_schedule_reset(struct ice_pf *pf, enum ice_reset_req reset)
+{
+	/* bail out if earlier reset has failed */
+	if (test_bit(__ICE_RESET_FAILED, pf->state)) {
+		dev_dbg(&pf->pdev->dev, "earlier reset has failed\n");
+		return -EIO;
+	}
+	/* bail if reset/recovery already in progress */
+	if (ice_is_reset_in_progress(pf->state)) {
+		dev_dbg(&pf->pdev->dev, "Reset already in progress\n");
+		return -EBUSY;
+	}
+
+	switch (reset) {
+	case ICE_RESET_PFR:
+		set_bit(__ICE_PFR_REQ, pf->state);
+		break;
+	case ICE_RESET_CORER:
+		set_bit(__ICE_CORER_REQ, pf->state);
+		break;
+	case ICE_RESET_GLOBR:
+		set_bit(__ICE_GLOBR_REQ, pf->state);
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	ice_service_task_schedule(pf);
+	return 0;
 }
 
 /**
@@ -1804,6 +1846,12 @@ static int ice_cfg_netdev(struct ice_vsi *vsi)
 	vsi->netdev = netdev;
 	np = netdev_priv(netdev);
 	np->vsi = vsi;
+	np->prov_callbacks.signature = IDC_SIGNATURE;
+	np->prov_callbacks.maj_ver = ICE_PEER_MAJOR_VER;
+	np->prov_callbacks.min_ver = ICE_PEER_MINOR_VER;
+	memset(np->prov_callbacks.rsvd, 0, sizeof(np->prov_callbacks.rsvd));
+	np->prov_callbacks.reg_peer_driver = ice_reg_peer_driver;
+	np->prov_callbacks.unreg_peer_driver = ice_unreg_peer_driver;
 
 	dflt_features = NETIF_F_SG	|
 			NETIF_F_HIGHDMA	|
@@ -2092,6 +2140,7 @@ static void ice_init_pf(struct ice_pf *pf)
 {
 	bitmap_zero(pf->flags, ICE_PF_FLAGS_NBITS);
 	set_bit(ICE_FLAG_MSIX_ENA, pf->flags);
+	set_bit(ICE_FLAG_IWARP_ENA, pf->flags);
 #ifdef CONFIG_PCI_IOV
 	if (pf->hw.func_caps.common_cap.sr_iov_1_1) {
 		struct ice_hw *hw = &pf->hw;
@@ -2145,6 +2194,21 @@ static int ice_ena_msix_range(struct ice_pf *pf)
 	v_budget += pf->num_lan_msix;
 	v_left -= pf->num_lan_msix;
 
+	if (test_bit(ICE_FLAG_IWARP_ENA, pf->flags)) {
+		needed = min_t(int, num_online_cpus(), v_left);
+
+		/* iWARP peer driver needs one extra interrupt, to be used for
+		 * other causes
+		 */
+		needed += 1;
+		/* no vectors left for RDMA */
+		if (v_left < needed)
+			goto no_vecs_left_err;
+		pf->num_rdma_msix = needed;
+		v_budget += needed;
+		v_left -= needed;
+	}
+
 	pf->msix_entries = devm_kcalloc(&pf->pdev->dev, v_budget,
 					sizeof(*pf->msix_entries), GFP_KERNEL);
 
@@ -2171,6 +2235,8 @@ static int ice_ena_msix_range(struct ice_pf *pf)
 			 "not enough vectors. requested = %d, obtained = %d\n",
 			 v_budget, v_actual);
 		if (v_actual >= (pf->num_lan_msix + 1)) {
+			clear_bit(ICE_FLAG_IWARP_ENA, pf->flags);
+			pf->num_rdma_msix = 0;
 			pf->num_avail_sw_msix = v_actual -
 						(pf->num_lan_msix + 1);
 		} else if (v_actual >= 2) {
@@ -2189,6 +2255,11 @@ msix_err:
 	devm_kfree(&pf->pdev->dev, pf->msix_entries);
 	goto exit_err;
 
+no_vecs_left_err:
+	dev_err(&pf->pdev->dev,
+		"not enough vectors. requested = %d, available = %d\n",
+		needed, v_left);
+	err = -ERANGE;
 exit_err:
 	pf->num_lan_msix = 0;
 	clear_bit(ICE_FLAG_MSIX_ENA, pf->flags);
@@ -2432,10 +2503,20 @@ ice_probe(struct pci_dev *pdev, const struct pci_device_id __always_unused *ent)
 		goto err_alloc_sw_unroll;
 	}
 
+	err = ice_init_peer_devices(pf);
+	if (err) {
+		dev_err(dev, "Failed to initialize peer devices: 0x%x\n", err);
+		err = -EIO;
+		goto err_init_peer_unroll;
+	}
+
 	ice_verify_cacheline_size(pf);
 
 	return 0;
 
+	/* Unwind non-managed device resources, etc. if something failed */
+err_init_peer_unroll:
+	bus_for_each_dev(&ice_peer_bus, NULL, NULL, ice_unroll_peer);
 err_alloc_sw_unroll:
 	set_bit(__ICE_SERVICE_DIS, pf->state);
 	set_bit(__ICE_DOWN, pf->state);
@@ -2460,6 +2541,7 @@ err_exit_unroll:
 static void ice_remove(struct pci_dev *pdev)
 {
 	struct ice_pf *pf = pci_get_drvdata(pdev);
+	enum ice_close_reason reason;
 	int i;
 
 	if (!pf)
@@ -2471,12 +2553,15 @@ static void ice_remove(struct pci_dev *pdev)
 		msleep(100);
 	}
 
-	set_bit(__ICE_DOWN, pf->state);
 	ice_service_task_stop(pf);
+	reason = ICE_REASON_INTERFACE_DOWN;
+	bus_for_each_dev(&ice_peer_bus, NULL, &reason, ice_peer_close);
+	set_bit(__ICE_DOWN, pf->state);
 
 	if (test_bit(ICE_FLAG_SRIOV_ENA, pf->flags))
 		ice_free_vfs(pf);
 	ice_vsi_release_all(pf);
+	bus_for_each_dev(&ice_peer_bus, NULL, NULL, ice_unreg_peer_device);
 	ice_free_irq_msix_misc(pf);
 	ice_for_each_vsi(pf, i) {
 		if (!pf->vsi[i])
@@ -2666,9 +2751,16 @@ static int __init ice_module_init(void)
 	pr_info("%s - version %s\n", ice_driver_string, ice_drv_ver);
 	pr_info("%s\n", ice_copyright);
 
+	status = bus_register(&ice_peer_bus);
+	if (status) {
+		pr_err("failed to register pseudo bus\n");
+		return status;
+	}
+
 	ice_wq = alloc_workqueue("%s", WQ_MEM_RECLAIM, 0, KBUILD_MODNAME);
 	if (!ice_wq) {
 		pr_err("Failed to create workqueue\n");
+		bus_unregister(&ice_peer_bus);
 		return -ENOMEM;
 	}
 
@@ -2676,6 +2768,11 @@ static int __init ice_module_init(void)
 	if (status) {
 		pr_err("failed to register PCI driver, err %d\n", status);
 		destroy_workqueue(ice_wq);
+		bus_unregister(&ice_peer_bus);
+		/* release all cached layer within ida tree, associated with
+		 * ice_peer_index_ida object
+		 */
+		ida_destroy(&ice_peer_index_ida);
 	}
 
 	return status;
@@ -2690,8 +2787,24 @@ module_init(ice_module_init);
  */
 static void __exit ice_module_exit(void)
 {
+	struct ice_peer_drv_int *peer_drv_int, *tmp;
+
 	pci_unregister_driver(&ice_driver);
 	destroy_workqueue(ice_wq);
+	mutex_lock(&ice_peer_drv_mutex);
+	list_for_each_entry_safe(peer_drv_int, tmp, &ice_peer_drv_list,
+				 drv_int_list) {
+		list_del(&peer_drv_int->drv_int_list);
+		kfree(peer_drv_int);
+	}
+	mutex_unlock(&ice_peer_drv_mutex);
+
+	bus_unregister(&ice_peer_bus);
+
+	/* release all cached layer within ida tree, associated with
+	 * ice_peer_index_ida object
+	 */
+	ida_destroy(&ice_peer_index_ida);
 	pr_info("module unloaded\n");
 }
 module_exit(ice_module_exit);
@@ -3904,6 +4017,7 @@ static int ice_change_mtu(struct net_device *netdev, int new_mtu)
 	struct ice_netdev_priv *np = netdev_priv(netdev);
 	struct ice_vsi *vsi = np->vsi;
 	struct ice_pf *pf = vsi->back;
+	struct ice_event *event;
 	u8 count = 0;
 
 	if (new_mtu == netdev->mtu) {
@@ -3954,6 +4068,13 @@ static int ice_change_mtu(struct net_device *netdev, int new_mtu)
 			return err;
 		}
 	}
+
+	event = devm_kzalloc(&pf->pdev->dev, sizeof(*event), GFP_KERNEL);
+	set_bit(ICE_EVENT_MTU_CHANGE, event->type);
+	event->reporter = NULL;
+	event->info.mtu = new_mtu;
+	bus_for_each_dev(&ice_peer_bus, NULL, event, ice_peer_check_for_reg);
+	devm_kfree(&pf->pdev->dev, event);
 
 	netdev_info(netdev, "changed MTU to %d\n", new_mtu);
 	return 0;
