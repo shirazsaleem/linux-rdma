@@ -114,7 +114,6 @@ static int i40iw_open(struct i40e_info *ldev, struct i40e_client *client)
 	}
 
 	irdma_add_handler(hdl);
-	irdma_probe_inc_ref(ldev->netdev);
 	return 0;
 error:
 	kfree(hdl);
@@ -208,7 +207,6 @@ static void i40iw_close(struct i40e_info *ldev, struct i40e_client *client,
 	irdma_deinit_ctrl_hw(rf);
 	irdma_del_handler(irdma_find_handler(ldev->pcidev));
 	kfree(hdl);
-	irdma_probe_dec_ref(ldev->netdev);
 	pr_info("IRDMA hardware deinitialization complete\n");
 }
 

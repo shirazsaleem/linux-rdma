@@ -276,153 +276,63 @@ void irdma_request_reset(struct irdma_pci_f *rf)
 		icrdma_request_reset(rf);
 }
 
-static struct irdma_peer_drvs_list *irdma_peer_drvs;
-
-/**
- * irdma_probe_inc_ref - Increment ref count for a probe
- * @netdev: netdev pointer
- */
-void irdma_probe_inc_ref(struct net_device *netdev)
+static int irdma_bus_probe(struct platform_device *pdev)
 {
-	struct irdma_peer *peer;
-	u32 i;
+	const struct platform_device_id *id = platform_get_device_id(pdev);
+	u8 peer_type = id->driver_data;
+	int ret = -ENODEV;
 
-	for (i = 0; i < IRDMA_MAX_PEERS; i++) {
-		peer = &irdma_peer_drvs->peer[i];
-		if (!strncmp(netdev->dev.parent->driver->name, peer->name,
-			     sizeof(peer->name)))
-			break;
-	}
-
-	if (i != IRDMA_MAX_PEERS)
-		atomic_inc(&peer->ref_count);
-}
-
-/**
- * irdma_probe_dec_ref - Decrement ref count for a probe
- * @netdev: netdev pointer
- */
-void irdma_probe_dec_ref(struct net_device *netdev)
-{
-	struct irdma_peer *peer;
-	u32 i;
-
-	for (i = 0; i < IRDMA_MAX_PEERS; i++) {
-		peer = &irdma_peer_drvs->peer[i];
-		if (!strcmp(netdev->dev.parent->driver->name, peer->name)) {
-			if (peer->state == IRDMA_STATE_VALID &&
-			    atomic_dec_and_test(&peer->ref_count)) {
-				peer->state = IRDMA_STATE_INVALID;
-				switch (i) {
-				case I40E_PEER_TYPE:
-					if (IS_ENABLED(CONFIG_INFINIBAND_I40IW))
-						return;
-
-					i40iw_unreg_peer_driver(peer);
-					break;
-				case ICE_PEER_TYPE:
-					icrdma_unreg_peer_driver(peer);
-					break;
-				default:
-					return;
-				}
-				module_put(peer->module);
-			}
-			break;
-		}
-	}
-}
-
-/**
- * irdma_handle_netdev - Find peer driver and register with it
- * @netdev: netdev of peer driver
- */
-void irdma_handle_netdev(struct net_device *netdev)
-{
-	struct irdma_peer *peer;
-	int ret;
-	u32 i;
-
-	for (i = 0; i < IRDMA_MAX_PEERS; i++) {
-		peer = &irdma_peer_drvs->peer[i];
-		if (netdev->dev.parent && netdev->dev.parent->driver &&
-		    !strncmp(netdev->dev.parent->driver->name, peer->name,
-			     sizeof(peer->name)))
-			break;
-	}
-
-	if (i == IRDMA_MAX_PEERS || peer->state == IRDMA_STATE_VALID)
-		return;
-
-	/* Found the driver */
-	peer = &irdma_peer_drvs->peer[i];
-	peer->module = netdev->dev.parent->driver->owner;
-
-	switch (i) {
-	case I40E_PEER_TYPE:
-		if (IS_ENABLED(CONFIG_INFINIBAND_I40IW))
-			return;
-
-		ret = i40iw_reg_peer_driver(peer, netdev);
+	switch (peer_type) {
+	case ICE_PEER_DEV:
+		ret = irdma_probe(pdev);
 		break;
-	case ICE_PEER_TYPE:
-		ret = icrdma_reg_peer_driver(peer, netdev);
-		break;
+	case I40E_PEER_DEV:
+		/* TODO: Add i40e dev support */
 	default:
-		return;
+		break;
 	}
 
-	/* call the register routine */
-	if (!ret) {
-		peer->state = IRDMA_STATE_VALID;
-		try_module_get(peer->module);
-	} else {
-		peer->state = IRDMA_STATE_REG_FAILED;
-	}
+	return ret;
 }
 
-/**
- * irdma_find_peers - Search netdevs for a peer drivers
- */
-static void irdma_find_peers(void)
+static int irdma_bus_remove(struct platform_device *pdev)
 {
-	struct net_device *dev;
+	const struct platform_device_id *id = platform_get_device_id(pdev);
+	u8 peer_type = id->driver_data;
 
-	rtnl_lock();
-	for_each_netdev (&init_net, dev)
-		irdma_handle_netdev(dev);
-	rtnl_unlock();
-}
-
-/**
- * irdma_unreg_peers - Unregister with all peers
- */
-static void irdma_unreg_peers(void)
-{
-	struct irdma_peer *peer;
-	u32 i;
-
-	for (i = 0; i < IRDMA_MAX_PEERS; i++) {
-		peer = &irdma_peer_drvs->peer[i];
-		if (peer->state == IRDMA_STATE_VALID) {
-			peer->state = IRDMA_STATE_INVALID;
-			switch (i) {
-			case I40E_PEER_TYPE:
-				if (IS_ENABLED(CONFIG_INFINIBAND_I40IW))
-					return;
-
-				i40iw_unreg_peer_driver(peer);
-				break;
-			case ICE_PEER_TYPE:
-				icrdma_unreg_peer_driver(peer);
-				break;
-			default:
-				return;
-			}
-			module_put(peer->module);
-		}
+	switch (peer_type) {
+	case ICE_PEER_DEV:
+		irdma_remove(pdev);
+		break;
+	case I40E_PEER_DEV:
+		/* TODO: Add i40e dev support */
+	default:
+		break;
 	}
+
+	return 0;
 }
+
+static const struct platform_device_id irdma_platform_id_table[] = {
+	{"rdma_ice", ICE_PEER_DEV},
+	/* TODO: Add i40e dev support
+	 * Add this entry to the table.
+	 * {"rdma_i40e", I40E_PEER_DEV}
+	 */
+	{},
+};
+
+MODULE_DEVICE_TABLE(platform, irdma_platform_id_table);
+
+struct platform_driver irdma_pdriver = {
+	.probe = irdma_bus_probe,
+	.remove = irdma_bus_remove,
+	.id_table = irdma_platform_id_table,
+	.driver = {
+		   .name = "irdma",
+		   .owner = THIS_MODULE,
+		  },
+};
 
 /**
  * irdma_init_module - driver initialization function
@@ -432,21 +342,16 @@ static void irdma_unreg_peers(void)
  */
 static int __init irdma_init_module(void)
 {
-	int ret = 0;
-	struct irdma_peer *peer;
+	int ret;
 
-	irdma_peer_drvs = kzalloc(sizeof(*irdma_peer_drvs), GFP_KERNEL);
-	if (!irdma_peer_drvs)
-		return -ENOMEM;
-	peer = &irdma_peer_drvs->peer[I40E_PEER_TYPE];
-	strncpy(peer->name, "i40e", sizeof(peer->name));
-	peer = &irdma_peer_drvs->peer[ICE_PEER_TYPE];
-	strncpy(peer->name, "ice", sizeof(peer->name));
-	irdma_find_peers();
-
+	ret = platform_driver_register(&irdma_pdriver);
+	if (ret) {
+		pr_err("Failed irdma platform_driver_register()\n");
+		return ret;
+	}
 	irdma_register_notifiers();
 
-	return ret;
+	return 0;
 }
 
 /**
@@ -458,8 +363,7 @@ static int __init irdma_init_module(void)
 static void __exit irdma_exit_module(void)
 {
 	irdma_unregister_notifiers();
-	irdma_unreg_peers();
-	kfree(irdma_peer_drvs);
+	platform_driver_unregister(&irdma_pdriver);
 }
 
 module_init(irdma_init_module);

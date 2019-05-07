@@ -278,10 +278,8 @@ int irdma_netdevice_event(struct notifier_block *notifier, unsigned long event,
 	struct net_device *netdev = netdev_notifier_info_to_dev(ptr);
 
 	iwdev = irdma_get_device(netdev);
-	if (!iwdev) {
-		irdma_handle_netdev(netdev);
+	if (!iwdev)
 		return NOTIFY_DONE;
-	}
 
 	iwdev->iw_status = 1;
 	switch (event) {

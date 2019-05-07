@@ -285,32 +285,40 @@ static void irdma_close(struct ice_peer_dev *ldev, enum ice_close_reason reason)
 }
 
 /**
- * irdma_remove - client interface remove operation for RDMA
- * @ldev: lan device information
- *
- * Called on module unload.
+ * irdma_deinit_pf - Unrolls PF initializations done during irdma_probe()
+ * @rf: RDMA PCI function
  */
-static int irdma_remove(struct ice_peer_dev *ldev)
+static void irdma_deinit_pf(struct irdma_pci_f *rf)
 {
-	struct irdma_handler *hdl;
-	struct irdma_pci_f *rf;
-
-	hdl = irdma_find_handler(ldev->pdev);
-	if (!hdl)
-		return 0;
-
-	rf = &hdl->rf;
-	if (rf->init_state != CEQ0_CREATED)
-		return -EBUSY;
-
 	if (rf->free_qp_wq)
 		destroy_workqueue(rf->free_qp_wq);
 	if (rf->free_cqbuf_wq)
 		destroy_workqueue(rf->free_cqbuf_wq);
 	irdma_deinit_ctrl_hw(rf);
-	irdma_del_handler(hdl);
-	kfree(hdl);
-	irdma_probe_dec_ref(ldev->netdev);
+	irdma_del_handler(rf->hdl);
+	kfree(rf->hdl);
+}
+
+/**
+ * irdma_remove - GEN_2 device remove()
+ * @pdev: platform device
+ *
+ * Called on module unload.
+ */
+int irdma_remove(struct platform_device *pdev)
+{
+	struct ice_peer_dev *ldev = container_of(pdev, struct ice_peer_dev,
+						 platform_dev);
+	struct irdma_handler *hdl;
+
+	hdl = irdma_find_handler(ldev->pdev);
+	if (!hdl)
+		return 0;
+
+	if (ldev->ops->request_uninit)
+		ldev->ops->request_uninit(ldev);
+
+	irdma_deinit_pf(&hdl->rf);
 	pr_info("IRDMA hardware deinitialization complete\n");
 
 	return 0;
@@ -323,26 +331,38 @@ static const struct ice_peer_ops irdma_peer_ops = {
 	.prep_tc_change = irdma_prep_tc_change,
 };
 
+static struct ice_peer_drv irdma_peer_drv = {
+	.driver_id = ICE_PEER_RDMA_DRIVER,
+	.name = KBUILD_MODNAME,
+	.ver.major = ICE_PEER_MAJOR_VER,
+	.ver.minor = ICE_PEER_MINOR_VER,
+};
+
 /**
- * irdma_probe - client interface probe operation for RDMA dev
- * @ldev: lan device information
+ * irdma_probe - GEN_2 device probe()
+ * @pdev: platform device
  *
- * Called by the lan driver during the processing of client register
  * Create device resources, set up queues, pble and hmc objects.
  * Return 0 if successful, otherwise return error
  */
-static int irdma_probe(struct ice_peer_dev *ldev)
+int irdma_probe(struct platform_device *pdev)
 {
+	struct ice_peer_dev *ldev = container_of(pdev, struct ice_peer_dev,
+						 platform_dev);
 	struct irdma_handler *hdl;
 	struct irdma_pci_f *rf;
 	struct irdma_sc_dev *dev;
 	struct irdma_priv_ldev *pldev;
+	int ret;
 
 	pr_info("probe: ldev=%p, ldev->dev.pdev.bus->number=%d, ldev->netdev=%p\n",
 		ldev, ldev->pdev->bus->number, ldev->netdev);
 	hdl = irdma_find_handler(ldev->pdev);
 	if (hdl)
 		return -EBUSY;
+
+	if (!ldev->ops->probe_finished)
+		return -EINVAL;
 
 	hdl = kzalloc(sizeof(*hdl), GFP_KERNEL);
 	if (!hdl)
@@ -380,25 +400,15 @@ static int irdma_probe(struct ice_peer_dev *ldev)
 	}
 	ldev->peer_ops = &irdma_peer_ops;
 
-	irdma_probe_inc_ref(ldev->netdev);
+	ldev->peer_drv = &irdma_peer_drv;
+	ret = ldev->ops->probe_finished(ldev);
+	if (ret) {
+		irdma_deinit_pf(rf);
+		return ret;
+	}
 
 	return 0;
 }
-
-static struct ice_peer_drv irdma_client = {
-	.dev_id.device = ICE_PEER_RDMA_DEV,
-	.dev_id.vendor = PCI_VENDOR_ID_INTEL,
-	.driver.mod_name = "irdma",
-	.driver.name = "irdma",
-	.driver.owner = THIS_MODULE,
-	.driver_id = ICE_PEER_RDMA_DRIVER,
-	.name = KBUILD_MODNAME,
-	.probe = irdma_probe,
-	.remove = irdma_remove,
-	.ver.major = ICE_PEER_MAJOR_VER,
-	.ver.minor = ICE_PEER_MINOR_VER,
-
-};
 
 /**
  * icrdma_request_reset - Request a reset
@@ -413,21 +423,3 @@ void icrdma_request_reset(struct irdma_pci_f *rf)
 		ldev->ops->request_reset(ldev, ICE_PEER_PFR);
 }
 
-int icrdma_reg_peer_driver(struct irdma_peer *peer, struct net_device *netdev)
-{
-	struct idc_srv_provider *sp;
-
-	sp = (struct idc_srv_provider *)netdev_priv(netdev);
-	if (sp->signature != IDC_SIGNATURE)
-		return -EINVAL;
-
-	peer->reg_peer_driver = (int (*)(void *))sp->reg_peer_driver;
-	peer->unreg_peer_driver = (int (*)(void *))sp->unreg_peer_driver;
-
-	return peer->reg_peer_driver(&irdma_client);
-}
-
-void icrdma_unreg_peer_driver(struct irdma_peer *peer)
-{
-	peer->unreg_peer_driver(&irdma_client);
-}

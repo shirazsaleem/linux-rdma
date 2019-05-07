@@ -21,6 +21,7 @@
 #include <linux/io.h>
 #include <linux/crc32c.h>
 #include <linux/kthread.h>
+#include <linux/platform_device.h>
 #include <rdma/ib_smi.h>
 #include <rdma/ib_verbs.h>
 #include <rdma/ib_pack.h>
@@ -118,9 +119,9 @@ enum IRDMA_IDC_STATE {
 	IRDMA_STATE_REG_FAILED
 };
 
-enum irdma_peer_type {
-	I40E_PEER_TYPE,
-	ICE_PEER_TYPE,
+enum irdma_peer_dev_type {
+	I40E_PEER_DEV,
+	ICE_PEER_DEV,
 	IRDMA_MAX_PEERS,
 };
 
@@ -647,15 +648,12 @@ int irdma_net_event(struct notifier_block *notifier, unsigned long event,
 		    void *ptr);
 int irdma_netdevice_event(struct notifier_block *notifier, unsigned long event,
 			  void *ptr);
+int irdma_probe(struct platform_device *pdev);
+int irdma_remove(struct platform_device *pdev);
 int i40iw_reg_peer_driver(struct irdma_peer *peer, struct net_device *netdev);
-int icrdma_reg_peer_driver(struct irdma_peer *peer, struct net_device *netdev);
 void i40iw_unreg_peer_driver(struct irdma_peer *peer);
-void icrdma_unreg_peer_driver(struct irdma_peer *peer);
 void i40iw_request_reset(struct irdma_pci_f *rf);
 void icrdma_request_reset(struct irdma_pci_f *rf);
-void irdma_probe_inc_ref(struct net_device *netdev);
-void irdma_probe_dec_ref(struct net_device *netdev);
-void irdma_handle_netdev(struct net_device *netdev);
 void irdma_register_notifiers(void);
 void irdma_unregister_notifiers(void);
 void irdma_cqp_ce_handler(struct irdma_pci_f *rf, struct irdma_sc_cq *cq);
